@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Pelago\Emogrifier\HtmlProcessor;
 
+use DOMNode;
+use Masterminds\HTML5;
+
 /**
  * Base class for HTML processor that e.g., can remove, add or modify nodes or attributes.
  *
@@ -38,6 +41,11 @@ abstract class AbstractHtmlProcessor
     protected $domDocument = null;
 
     /**
+     * @var HTML5|null
+     */
+    protected $html5 = null;
+
+    /**
      * @var \DOMXPath
      */
     protected $xPath = null;
@@ -55,19 +63,20 @@ abstract class AbstractHtmlProcessor
      * Builds a new instance from the given HTML.
      *
      * @param string $unprocessedHtml raw HTML, must be UTF-encoded, must not be empty
+     * @param bool $html5 use masterminds/html5 parser instead of DOMDocument.
      *
      * @return static
      *
      * @throws \InvalidArgumentException if $unprocessedHtml is anything other than a non-empty string
      */
-    public static function fromHtml(string $unprocessedHtml): self
+    public static function fromHtml(string $unprocessedHtml, ?bool $html5 = null): self
     {
         if ($unprocessedHtml === '') {
             throw new \InvalidArgumentException('The provided HTML must not be empty.', 1515763647);
         }
 
         $instance = new static();
-        $instance->setHtml($unprocessedHtml);
+        $instance->setHtml($unprocessedHtml, $html5);
 
         return $instance;
     }
@@ -91,10 +100,14 @@ abstract class AbstractHtmlProcessor
      * Sets the HTML to process.
      *
      * @param string $html the HTML to process, must be UTF-8-encoded
+     * @param bool $html5 use masterminds/html5 parser instead of DOMDocument.
      */
-    private function setHtml(string $html): void
+    private function setHtml(string $html, ?bool $html5): void
     {
-        $this->createUnifiedDomDocument($html);
+        // If html5 is NULL, fallback to the environment flag.
+        $html5 = $html5 ?? $this->isHtml5Env();
+
+        $this->createUnifiedDomDocument($html, $html5);
     }
 
     /**
@@ -136,7 +149,7 @@ abstract class AbstractHtmlProcessor
      */
     public function render(): string
     {
-        $htmlWithPossibleErroneousClosingTags = $this->getDomDocument()->saveHTML();
+        $htmlWithPossibleErroneousClosingTags = $this->saveHTML();
 
         return $this->removeSelfClosingTagsClosingTags($htmlWithPossibleErroneousClosingTags);
     }
@@ -148,7 +161,7 @@ abstract class AbstractHtmlProcessor
      */
     public function renderBodyContent(): string
     {
-        $htmlWithPossibleErroneousClosingTags = $this->getDomDocument()->saveHTML($this->getBodyElement());
+        $htmlWithPossibleErroneousClosingTags = $this->saveHTML($this->getBodyElement());
         $bodyNodeHtml = $this->removeSelfClosingTagsClosingTags($htmlWithPossibleErroneousClosingTags);
 
         return \preg_replace('%</?+body(?:\\s[^>]*+)?+>%', '', $bodyNodeHtml);
@@ -184,11 +197,34 @@ abstract class AbstractHtmlProcessor
      * The DOM document will always have a BODY element and a document type.
      *
      * @param string $html
+     * @param bool $html5
      */
-    private function createUnifiedDomDocument(string $html): void
+    private function createUnifiedDomDocument(string $html, bool $html5): void
     {
-        $this->createRawDomDocument($html);
+        $html = $this->prepareHtmlForDomConversion($html);
+
+        $html5 ? $this->createHtml5Document($html) : $this->createRawDomDocument($html);
+
         $this->ensureExistenceOfBodyElement();
+    }
+
+    /**
+     * Creates a HTML5 document parser instance from the given HTML.
+     *
+     * @param string $html
+     *
+     * @throws \RuntimeException
+     */
+    private function createHtml5Document(string $html): void
+    {
+        if (!\class_exists(HTML5::class)) {
+            throw new \RuntimeException('Class ' . HTML5::class . 'not found. Install the masterminds/html5 library.');
+        }
+
+        $this->html5 = new HTML5(['disable_html_ns' => true]);
+        $domDocument = $this->html5->parse($html);
+
+        $this->setDomDocument($domDocument);
     }
 
     /**
@@ -202,7 +238,7 @@ abstract class AbstractHtmlProcessor
         $domDocument->strictErrorChecking = false;
         $domDocument->formatOutput = true;
         $libXmlState = \libxml_use_internal_errors(true);
-        $domDocument->loadHTML($this->prepareHtmlForDomConversion($html));
+        $domDocument->loadHTML($html);
         \libxml_clear_errors();
         \libxml_use_internal_errors($libXmlState);
 
@@ -335,5 +371,41 @@ abstract class AbstractHtmlProcessor
             throw new \UnexpectedValueException('There is no HTML element although there should be one.', 1569930853);
         }
         $htmlElement->appendChild($this->getDomDocument()->createElement('body'));
+    }
+
+    /**
+     * Dumps the internal document into a string using HTML formatting.
+     *
+     * @param  DOMNode $dom [optional] parameter to output a subset of the document.
+     *
+     * @return string the HTML, or false if an error occurred.
+     */
+    private function saveHTML(DOMNode $dom = null): string
+    {
+        if (isset($this->html5)) {
+            if ($dom === null) {
+                $dom = $this->domDocument;
+            }
+
+            return $this->html5->saveHTML($dom);
+        }
+
+        // Fall back to DOMDocument.
+        return $this->getDomDocument()->saveHTML($dom);
+    }
+
+    /**
+     * Check whether HTML5 environment is enabled.
+     *
+     * @return bool
+     */
+    private function isHtml5Env(): bool
+    {
+        $env = \getenv('EMOGRIFIER_HTML5');
+        if (is_bool($env)) {
+            return $env;
+        }
+
+        return false;
     }
 }
